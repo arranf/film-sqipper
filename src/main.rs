@@ -2,7 +2,7 @@ use amiquip::{
     AmqpProperties, Connection, ConsumerMessage, ConsumerOptions, Exchange, Publish,
     QueueDeclareOptions, Result,
 };
-use log::{error, info, trace};
+use log::{error, info};
 
 mod message;
 mod sqip;
@@ -28,6 +28,9 @@ async fn main() -> Result<()> {
         connection = Connection::insecure_open(&addr)?;
     }
 
+    // TODO: Health check
+    // TODO: Connection recovery
+
     let channel = connection.open_channel(None)?;
     let exchange = Exchange::direct(&channel);
     let consumer_queue = channel.queue_declare(
@@ -43,22 +46,29 @@ async fn main() -> Result<()> {
     let consumer = consumer_queue.consume(ConsumerOptions::default())?;
     info!("Waiting for messages: {}", SQIP_CREATE_QUEUE);
 
-    for (i, message) in consumer.receiver().iter().enumerate() {
+    for (_, message) in consumer.receiver().iter().enumerate() {
         match message {
             ConsumerMessage::Delivery(delivery) => {
                 let message: SqipCreateMessage =
                     serde_json::from_slice(&delivery.body).expect("Failed to obtain JSON");
-                trace!("({:>3}) Received [{:?}]", i, message);
+                info!("Received [{:?}]", message);
 
-                let done_message: SqipDoneMessage = generate_sqip(&message).await.unwrap();
-
-
-                exchange.publish(Publish::with_properties(
-                    &serde_json::to_vec(&done_message).expect("Expect message to serialize"),
-                    SQIP_DONE_QUEUE,
-                    AmqpProperties::default(),
-                ))?;
-                consumer.ack(delivery)?;
+                let done_message: Result<SqipDoneMessage, anyhow::Error> =
+                    generate_sqip(&message).await;
+                match done_message {
+                    Ok(done_message) => {
+                        exchange.publish(Publish::with_properties(
+                            &serde_json::to_vec(&done_message)
+                                .expect("Expect message to serialize"),
+                            SQIP_DONE_QUEUE,
+                            AmqpProperties::default(),
+                        ))?;
+                        consumer.ack(delivery)?;
+                    }
+                    Err(err) => {
+                        error!("Error processing message {}", err);
+                    }
+                }
             }
             other => {
                 error!("Consumer ended: {:?}", other);
